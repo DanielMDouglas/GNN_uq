@@ -67,12 +67,13 @@ class ShowerFeatures(GraphDataset):
     class: an interface for shower fragment data files. This Dataset is designed to produce a batch of
            of node and edge feature data.
     """
-    def __init__(self, file_path):
+    def __init__(self, file_path, mode):
         """
         Args: file_path ..... path to the HDF5 file that contains the feature data
         """
         # Initialize a file handle, count the number of entries in the file
         self._file_path = file_path
+        self._mode = mode
         self._file_handle = None
         with h5py.File(self._file_path, "r", swmr=True) as data_file:
             self._entries = len(data_file['node_features'])
@@ -96,14 +97,57 @@ class ShowerFeatures(GraphDataset):
             self._file_handle = h5py.File(self._file_path, "r", swmr=True)
             
         node_info = torch.tensor(self._file_handle['node_features'][idx].reshape(-1, 19), dtype=torch.float32)
-        node_features, group_ids, node_labels = node_info[:,:-3], node_info[:,-2].long(), node_info[:,-1].long()
+        node_features = node_info[:,:-3]
+        group_ids = node_info[:,-2].long()
+        node_labels = node_info[:,-1].long()
+
+        edge_info = torch.tensor(self._file_handle['edge_features'][idx].reshape(-1, 22),
+                                 dtype=torch.float32)
+        edge_features = edge_info[:,:-3]
+        edge_index = edge_info[:,-3:-1].long().t()
+        edge_labels = edge_info[:,-1].long()
+
+        # noise_lb, noise_ub = 0.02, 0.05
+        noise_lb, noise_ub = 0.05, 0.20
+        # noise_lb, noise_ub = 0.05, 0.10
+        # noise_lb, noise_ub = 0.1, 0.3
+        if self._mode in ['UA', 'blind']:
+            node_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(node_features.shape) # noise magnitude for UA/blind
+            node_noise *= torch.abs(node_features)
+            noisy_node_features = torch.normal(node_features, node_noise) # noisy features or UA/blind
+            # print (node_features)
+            # node_mean = torch.Tensor([]) # mean of node features
+            # node_std = torch.Tensor([]) # mean of node features
+
+            # noise_mean = 0.5*(noise_lb + noise_ub)*node_mean
+            # noise_std = 0.5*(noise_lb + noise_ub)*node_mean
+            # # print (torch.log(node_noise).shape)
+            # # print (torch.mean(torch.log(node_noise), dim = 0),
+            # #        torch.std(torch.log(node_noise), dim = 0),
+            # #        )
+
+            edge_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(edge_features.shape)
+            edge_noise *= torch.abs(edge_features)
+            noisy_edge_features = torch.normal(edge_features, edge_noise)
+            # print (edge_features - noisy_edge_features)
+
+        elif self._mode in ['nonoise']:
+            node_noise = torch.zeros_like(node_features.shape) # for no noise
+            noisy_node_features = node_features # for no noise
+
+            edge_noise = torch.zeros_like(edge_features.shape)
+            noisy_edge_features = edge_features
+            
+        if self._mode in ['UA', 'nonoise']:
+            node_uq_features = torch.cat((noisy_node_features, node_noise), dim = -1) # for UA/no noise
+            edge_uq_features = torch.cat((noisy_edge_features, edge_noise), dim = -1)
+        elif self._mode in ['blind']:
+            node_uq_features = torch.cat((noisy_node_features, torch.zeros_like(node_noise)), dim = -1) # for blind
+            edge_uq_features = torch.cat((noisy_edge_features, torch.zeros_like(edge_noise)), dim = -1)
         
-        edge_info = torch.tensor(self._file_handle['edge_features'][idx].reshape(-1, 22), dtype=torch.float32)
-        edge_features, edge_index, edge_labels = edge_info[:,:-3], edge_info[:,-3:-1].long().t(), edge_info[:,-1].long()
-        
-        return GraphData(x = node_features,
+        return GraphData(x = node_uq_features,
                          edge_index = edge_index,
-                         edge_attr = edge_features,
+                         edge_attr = edge_uq_features,
                          y = node_labels,
                          edge_label = edge_labels,
                          index = idx)

@@ -20,11 +20,11 @@ class EdgeUpdate(torch.nn.Module):
         return '{}(nn={})'.format(self.__class__.__name__, self.nn)
 
 class GCN(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, n_feat):
         super().__init__()
-        self.conv1 = GCNConv(16, 32)
-        self.conv2 = GCNConv(32, 64)
-        self.conv3 = GCNConv(64, 1)
+        self.conv1 = GCNConv(n_feat, 2*n_feat)
+        self.conv2 = GCNConv(2*n_feat, 4*n_feat)
+        self.conv3 = GCNConv(4*n_feat, 1)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -40,10 +40,20 @@ class GCN(torch.nn.Module):
         return torch.sigmoid(x)
 
 class EdgeConvNet(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, input_node_feats = 16, input_edge_feats = 19):
         super().__init__()
-        nodeFeatSize = (16, 64, 128, 256, 1)
-        edgeFeatSize = (19, 64, 128, 256, 1)
+        # nodeFeatSize = (16, 64, 128, 256, 1)
+        # edgeFeatSize = (19, 64, 128, 256, 1)
+        nodeFeatSize = (input_node_feats,
+                        4*input_node_feats,
+                        8*input_node_feats,
+                        16*input_node_feats,
+                        1)
+        edgeFeatSize = (input_edge_feats,
+                        4*input_edge_feats,
+                        8*input_edge_feats,
+                        16*input_edge_feats,
+                        1)
 
         self.nodeMessageMap1 = nn.Sequential(nn.BatchNorm1d(2*nodeFeatSize[0]),
                                              nn.Linear(2*nodeFeatSize[0], 
