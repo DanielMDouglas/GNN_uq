@@ -92,25 +92,73 @@ def main(args):
 
     score_bins = np.linspace(0, 1, 51)
     fig = plt.figure()
-    plt.hist(node_scores,
+    plt.hist(node_scores[node_label == 0],
              bins = score_bins,
              histtype = 'step',
+             label = 'label == 0',
              )
+    plt.hist(node_scores[node_label == 1],
+             bins = score_bins,
+             histtype = 'step',
+             label = 'label == 1',
+             )
+    plt.semilogy()
+    plt.legend()
     plt.xlabel('Node score')
     plt.savefig(os.path.join(args.output,
                              'node_score.png'))
 
     fig = plt.figure()
-    plt.hist(edge_scores,
+    plt.hist(edge_scores[edge_label == 0],
              bins = score_bins,
              histtype = 'step',
+             label = 'label == 0'
              )
+    plt.hist(edge_scores[edge_label == 1],
+             bins = score_bins,
+             histtype = 'step',
+             label = 'label == 1'
+             )
+    plt.legend()
+    plt.semilogy()
     plt.xlabel('Edge score')
     plt.savefig(os.path.join(args.output,
                              'edge_score.png'))
 
-    print (np.histogram(edge_scores, bins = score_bins,
-                        weights = node_label))
+    weighted_counts, bins = np.histogram(edge_scores.flatten(), bins = score_bins,
+                                         weights = edge_label.flatten())
+    unweighted_counts, bins = np.histogram(edge_scores.flatten(), bins = score_bins)
+    fig = plt.figure()
+    plt.plot(0.5*(score_bins[1:] + score_bins[:-1]),
+             weighted_counts/unweighted_counts,
+             )
+    plt.plot(np.linspace(0, 1, 1000),
+             np.linspace(0, 1, 1000),
+             ls = '--',
+             color = 'red',
+             )
+    plt.xlabel(r'Edge Score')
+    plt.ylabel(r'Fraction of True Edges')
+    plt.savefig(os.path.join(args.output,
+                             'edge_calib.png'))
+
+    weighted_counts, bins = np.histogram(node_scores.flatten(), bins = score_bins,
+                                         weights = node_label.flatten())
+    unweighted_counts, bins = np.histogram(node_scores.flatten(), bins = score_bins)
+    fig = plt.figure()
+    plt.plot(0.5*(score_bins[1:] + score_bins[:-1]),
+             weighted_counts/unweighted_counts,
+             )
+    plt.plot(np.linspace(0, 1, 1000),
+             np.linspace(0, 1, 1000),
+             ls = '--',
+             color = 'red',
+             )
+    plt.xlabel(r'Node Score')
+    plt.ylabel(r'Fraction of True Nodes')
+    plt.savefig(os.path.join(args.output,
+                             'node_calib.png'))
+
     
     return
 

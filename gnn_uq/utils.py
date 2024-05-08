@@ -108,9 +108,9 @@ class ShowerFeatures(GraphDataset):
         edge_labels = edge_info[:,-1].long()
 
         # noise_lb, noise_ub = 0.02, 0.05
-        noise_lb, noise_ub = 0.05, 0.20
+        # noise_lb, noise_ub = 0.05, 0.20
         # noise_lb, noise_ub = 0.05, 0.10
-        # noise_lb, noise_ub = 0.1, 0.3
+        noise_lb, noise_ub = 0.1, 0.3
         if self._mode in ['UA', 'blind']:
             node_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(node_features.shape) # noise magnitude for UA/blind
             node_noise *= torch.abs(node_features)
