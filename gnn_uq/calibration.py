@@ -17,7 +17,8 @@ from models import *
 
 def main(args):
     data = ShowerFeatures(file_path = args.test,
-                          mode = args.mode)
+                          mode = args.mode,
+                          noise_interval = (0.1, 0.3))
     dataloader = GraphDataLoader(data,
                                  shuffle     = True,
                                  num_workers = 0,

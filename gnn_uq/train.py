@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 from torch_geometric.loader import DataLoader as GraphDataLoader
-from utils import ShowerFeatures
+# from utils import ShowerFeatures
+from voxelBasedNoise import ShowerFeaturesFromVoxels
 
 from torch_geometric.nn import GCNConv, EdgeConv
 from models import *
@@ -32,6 +33,7 @@ def trainLoop(model, dataloader, optimizer, **kwargs):
                                           nodeTarget)
         
         edgeTarget = batch.edge_label.clone().detach().float()
+        
         edgeLoss = F.binary_cross_entropy(edgeInf[:,0],
                                           edgeTarget)
         
@@ -104,24 +106,37 @@ def testLoop(model, dataloader, **kwargs):
     return test_loss, test_node_acc, test_edge_acc
         
 def main(args):
-    train_data = ShowerFeatures(file_path = args.train, mode = args.mode)
+    num_workers = 4
+    batch_size = 4
+    # train_data = ShowerFeatures(file_path = args.train, mode = args.mode)
+    train_data = ShowerFeaturesFromVoxels(file_path = args.train,
+                                          mode = args.mode,
+                                          # dropout_eff = 1,
+                                          # dropout_eff = 0.8,
+                                          dropout_eff = 0.75,
+    )
     train_dataloader = GraphDataLoader(train_data,
                                        shuffle     = True,
-                                       num_workers = 0,
-                                       batch_size  = 64
+                                       num_workers = num_workers,
+                                       batch_size  = batch_size
     )
 
-    test_data = ShowerFeatures(file_path = args.test, mode = args.mode) 
+    test_data = ShowerFeaturesFromVoxels(file_path = args.test,
+                                         mode = args.mode,
+                                         # dropout_eff = 1,
+                                         # dropout_eff = 0.8,
+                                         dropout_eff = 0.75,
+    ) 
     test_dataloader = GraphDataLoader(test_data,
                                       shuffle     = True,
-                                      num_workers = 0,
-                                      batch_size  = 64
+                                      num_workers = num_workers,
+                                      batch_size  = batch_size
     )
 
-    # model = EdgeConvNet().to(device)
-    model = EdgeConvNet(input_node_feats = 32,
-                        input_edge_feats = 38).to(device)
-
+    model = EdgeConvNet().to(device)
+    # model = EdgeConvNet(input_node_feats = 32,
+    #                     input_edge_feats = 38).to(device)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=1.e-5, weight_decay=5e-4)
 
     train_loss = []
@@ -214,6 +229,9 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--nEpochs', type = int,
                         default = 5,
                         help = "maximum number of epochs to train")
+    parser.add_argument('-c', '--checkpoint', type = str,
+                        default = '.',
+                        help = "checkpoint to load")
     parser.add_argument('-o', '--output', type = str,
                         default = '.',
                         help = "output prefix directory")
