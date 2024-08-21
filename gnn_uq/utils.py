@@ -277,3 +277,73 @@ class ShowerFeaturesPared(GraphDataset):
 
     def get(self,idx):
         return self[idx]
+
+class ShowerFeaturesMeanonly(GraphDataset):
+    """
+    class: an interface for shower fragment data files. This Dataset is designed to produce a batch of
+           of node and edge feature data.
+    """
+    def __init__(self, file_path, mode, noise_interval = (0.2, 0.5)):
+        """
+        Args: file_path ..... path to the HDF5 file that contains the feature data
+        """
+        # Initialize a file handle, count the number of entries in the file
+        self._file_path = file_path
+        self._mode = mode
+        self._file_handle = None
+        self._noise_interval = noise_interval
+        with h5py.File(self._file_path, "r", swmr=True) as data_file:
+            self._entries = len(data_file['node_features'])
+
+    def __del__(self):
+        
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+            
+    def __len__(self):
+        return self._entries
+
+    def len(self):
+        return len(self._entries)
+
+    def __getitem__(self, idx):
+        
+        # Get the subset of node and edge features that correspond to the requested event ID
+        if self._file_handle is None:
+            self._file_handle = h5py.File(self._file_path, "r", swmr=True)
+            
+        node_info = torch.tensor(self._file_handle['node_features'][idx].reshape(-1, 19), dtype=torch.float32)
+        node_feature_selection = torch.Tensor([0, 1, 2,
+                                               3, #4, 5,
+                                               6, 7, #8,
+                                               9, 10, 11,
+                                               #12, 13, 14,
+                                               15]).long()
+        node_features = node_info[:,node_feature_selection]
+        group_ids = node_info[:,-2].long()
+        node_labels = node_info[:,-1].long()
+
+        edge_info = torch.tensor(self._file_handle['edge_features'][idx].reshape(-1, 22),
+                                 dtype=torch.float32)
+        edge_feature_selection = torch.Tensor([0, 1, 2,
+                                               3, 4, 5,
+                                               # 6, 7, 8,
+                                               # 9,
+                                               # 10, 11, 12,
+                                               # 13, 14, 15,
+                                               # 16, 17, 18,
+        ]).long()
+        edge_features = edge_info[:,edge_feature_selection]
+        edge_index = edge_info[:,-3:-1].long().t()
+        edge_labels = edge_info[:,-1].long()
+                    
+        return GraphData(x = node_features,
+                         edge_index = edge_index,
+                         edge_attr = edge_features,
+                         y = node_labels,
+                         edge_label = edge_labels,
+                         index = idx)
+
+    def get(self,idx):
+        return self[idx]
