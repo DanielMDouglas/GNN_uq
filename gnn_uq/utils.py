@@ -278,6 +278,118 @@ class ShowerFeaturesPared(GraphDataset):
     def get(self,idx):
         return self[idx]
 
+class ShowerFeaturesParedSDP(GraphDataset):
+    """
+    class: an interface for shower fragment data files. This Dataset is designed to produce a batch of
+           of node and edge feature data.
+    """
+    def __init__(self, file_path, noise_interval = (0.2, 0.5)):
+        """
+        Args: file_path ..... path to the HDF5 file that contains the feature data
+        """
+        # Initialize a file handle, count the number of entries in the file
+        self._file_path = file_path
+        self._file_handle = None
+        self._noise_interval = noise_interval
+        with h5py.File(self._file_path, "r", swmr=True) as data_file:
+            self._entries = len(data_file['node_features'])
+
+    def __del__(self):
+        
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+            
+    def __len__(self):
+        return self._entries
+
+    def len(self):
+        return len(self._entries)
+
+    def __getitem__(self, idx):
+        
+        # Get the subset of node and edge features that correspond to the requested event ID
+        if self._file_handle is None:
+            self._file_handle = h5py.File(self._file_path, "r", swmr=True)
+            
+        node_info = torch.tensor(self._file_handle['node_features'][idx].reshape(-1, 19), dtype=torch.float32)
+        node_feature_selection = torch.Tensor([0, 1, 2,
+                                               3, #4, 5,
+                                               6, 7, #8,
+                                               9, 10, 11,
+                                               #12, 13, 14,
+                                               15]).long()
+        node_features = node_info[:,node_feature_selection]
+        group_ids = node_info[:,-2].long()
+        node_labels = node_info[:,-1].long()
+
+        edge_info = torch.tensor(self._file_handle['edge_features'][idx].reshape(-1, 22),
+                                 dtype=torch.float32)
+        edge_feature_selection = torch.Tensor([0, 1, 2,
+                                               3, 4, 5,
+                                               # 6, 7, 8,
+                                               # 9,
+                                               # 10, 11, 12,
+                                               # 13, 14, 15,
+                                               # 16, 17, 18,
+        ]).long()
+        edge_features = edge_info[:,edge_feature_selection]
+        edge_index = edge_info[:,-3:-1].long().t()
+        edge_labels = edge_info[:,-1].long()
+
+        # noise_lb, noise_ub = 0.02, 0.05
+        # noise_lb, noise_ub = 0.05, 0.20
+        # noise_lb, noise_ub = 0.05, 0.10
+        # noise_lb, noise_ub = 0.1, 0.3
+        # noise_lb, noise_ub = 0.2, 0.3
+        # noise_lb, noise_ub = 0.2, 0.5
+        noise_lb, noise_ub = self._noise_interval[0], self._noise_interval[1]
+        # import time
+
+        # t1 = time.clock_gettime(0)
+        node_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(node_features.shape) # noise magnitude for UA/blind
+        node_noise *= torch.abs(node_features)
+        node_noise += 1.e-4
+        # print (torch.all(node_noise >= 0))
+        noisy_node_features = torch.normal(node_features, node_noise) # noisy features or UA/blind
+        
+        # t2 = time.clock_gettime(0)
+        
+        edge_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(edge_features.shape)
+        edge_noise *= torch.abs(edge_features)
+        edge_noise += 1.e-4
+        noisy_edge_features = torch.normal(edge_features, edge_noise)
+        # t3 = time.clock_gettime(0)
+        # print ("making noise", t3 - t2, t2 - t1)
+        
+        # ti = time.clock_gettime(0)
+        node_uq_features = torch.cat((noisy_node_features,
+                                      torch.log(node_noise)),
+                                     dim = -1) # for UA/no noise
+        edge_uq_features = torch.cat((noisy_edge_features,
+                                      torch.log(edge_noise)),
+                                     dim = -1)
+        # tf = time.clock_gettime(0)
+        # print ("packaging noise", tf - ti)
+
+        mean_graph_data = GraphData(x = noisy_node_features,
+                                    edge_index = edge_index,
+                                    edge_attr = noisy_edge_features,
+                                    y = node_labels,
+                                    edge_label = edge_labels,
+                                    index = idx)
+        std_graph_data = GraphData(x = node_noise,
+                                   edge_index = edge_index,
+                                   edge_attr = edge_noise,
+                                   y = node_labels,
+                                   edge_label = edge_labels,
+                                   index = idx)
+        
+        return mean_graph_data, std_graph_data
+    
+    def get(self,idx):
+        return self[idx]
+
 class ShowerFeaturesMeanonly(GraphDataset):
     """
     class: an interface for shower fragment data files. This Dataset is designed to produce a batch of
