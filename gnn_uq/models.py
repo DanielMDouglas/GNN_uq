@@ -182,8 +182,9 @@ class EdgeConv_SDP(torch.nn.Module):
                          y = inpt.y,
                          edge_label = inpt.edge_label,
                          index = inpt.index)
-        node_unc = inpt.x[:,self.input_node_feats:]
-        edge_unc = inpt.edge_attr[:,self.input_edge_feats:]
+        node_unc = torch.exp(inpt.x[:,self.input_node_feats:])
+        edge_unc = torch.exp(inpt.edge_attr[:,self.input_edge_feats:])
+        print (node_unc)
 
         node_inf, edge_inf =  self.inner_GNN(mean)
 
