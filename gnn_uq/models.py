@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from torch_geometric.nn import GCNConv, EdgeConv
 from torch_geometric.data import Data as GraphData
 
@@ -41,7 +42,7 @@ class GCN(torch.nn.Module):
         return torch.sigmoid(x)
 
 class EdgeConvNet(torch.nn.Module):
-    def __init__(self, input_node_feats = 16, input_edge_feats = 19, final_sigmoid = True):
+    def __init__(self, input_node_feats = 16, input_edge_feats = 19, final_sigmoid = True, aggr = 'max'):
         super().__init__()
 
         self.final_sigmoid = final_sigmoid
@@ -58,6 +59,8 @@ class EdgeConvNet(torch.nn.Module):
                         16*input_edge_feats,
                         1)
 
+        self.aggr = aggr
+
         self.nodeMessageMap1 = nn.Sequential(nn.BatchNorm1d(2*nodeFeatSize[0]),
                                              nn.Linear(2*nodeFeatSize[0], 
                                                        nodeFeatSize[1]),
@@ -72,7 +75,8 @@ class EdgeConvNet(torch.nn.Module):
                                              nn.ReLU(),
                                              nn.BatchNorm1d(nodeFeatSize[1]),
         )
-        self.nodeMP1 = EdgeConv(self.nodeMessageMap1)
+        self.nodeMP1 = EdgeConv(self.nodeMessageMap1, aggr = self.aggr)
+        # self.nodeMP1 = self.nodeMessageMap1
 
         self.edgeMessageMap1 = nn.Sequential(nn.BatchNorm1d(2*nodeFeatSize[1] + edgeFeatSize[0]),
                                              nn.Linear(2*nodeFeatSize[1] + edgeFeatSize[0], 
@@ -103,7 +107,7 @@ class EdgeConvNet(torch.nn.Module):
                                              nn.ReLU(),
                                              nn.BatchNorm1d(nodeFeatSize[2]),
         )
-        self.nodeMP2 = EdgeConv(self.nodeMessageMap2)
+        self.nodeMP2 = EdgeConv(self.nodeMessageMap2, aggr = self.aggr)
 
         self.edgeMessageMap2 = nn.Sequential(nn.BatchNorm1d(2*nodeFeatSize[2] + edgeFeatSize[1]),
                                              nn.Linear(2*nodeFeatSize[2] + edgeFeatSize[1], 
@@ -185,19 +189,19 @@ class EdgeConv_SDP(torch.nn.Module):
         self.input_edge_feats = input_edge_feats
         self.inner_GNN = EdgeConvNet(input_node_feats,
                                      input_edge_feats,
-                                     final_sigmoid = False)
+                                     final_sigmoid = False,
+                                     aggr = 'add')
 
-    def forward(self, inpt):
+    def forward(self, inpt, final_sigmoid = True):
         mean = GraphData(x = inpt.x[:,:self.input_node_feats],
                          edge_index = inpt.edge_index,
                          edge_attr = inpt.edge_attr[:,:self.input_edge_feats],
                          y = inpt.y,
                          edge_label = inpt.edge_label,
                          index = inpt.index)
-        node_unc = torch.exp(inpt.x[:,self.input_node_feats:])
-        edge_unc = torch.exp(inpt.edge_attr[:,self.input_edge_feats:])
-        print (node_unc)
-
+        # node_unc = torch.exp(inpt.x[:,self.input_node_feats:])
+        # edge_unc = torch.exp(inpt.edge_attr[:,self.input_edge_feats:])
+        
         node_inf, edge_inf =  self.inner_GNN(mean)
 
         return torch.sigmoid(node_inf), torch.sigmoid(edge_inf)
@@ -206,68 +210,76 @@ class EdgeConv_SDP(torch.nn.Module):
         node_mean = node_feats[:,:self.input_node_feats]
         edge_mean = edge_feats[:,:self.input_edge_feats]
         
-        node_unc = torch.exp(inpt.x[:,self.input_node_feats:])
-        edge_unc = torch.exp(inpt.edge_attr[:,self.input_edge_feats:])
-        
         node_inf, edge_inf =  self.inner_GNN.forward_from_tensors(node_mean, edge_mean, edge_index)
 
         return torch.sigmoid(node_inf), torch.sigmoid(edge_inf)
-    
+
+    def forward_from_node_tensor(self, edge_feats, edge_index):
+
+        def single_parameter_function(node_feats):
+            return self.forward_from_tensors(node_feats, edge_feats, edge_index)
+
+        return single_parameter_function
+
+    def forward_from_edge_tensor(self, node_feats, edge_index):
+
+        def single_parameter_function(edge_feats):
+            return self.forward_from_tensors(node_feats, edge_feats, edge_index)
+
+        return single_parameter_function
+
     def predict (self, inpt):
         print ("jacobian calculating...")
-        J = torch.vmap(torch.func.jacrev(self.forward_from_tensors))(inpt.x, inpt.edge_attr, inpt.index)
-
-        print ("jacobian incomming...")
-        print (J)
+        # J = torch.vmap(torch.func.jacrev(self.forward_from_node_tensor(inpt.edge_attr, inpt.index)))(inpt.x)
+        node_mean = inpt.x[:,:self.input_node_feats]
+        edge_mean = inpt.edge_attr[:,:self.input_edge_feats]
         
-        # print (node_inf)
-        # print (node_inf[0])
+        node_unc = torch.flatten(torch.exp(inpt.x[:,self.input_node_feats:]))
+        edge_unc = torch.flatten(torch.exp(inpt.edge_attr[:,self.input_edge_feats:]))
 
-        # node_inf_unc = torch.empty_like(node_inf)
-        # edge_inf_unc = torch.empty_like(edge_inf)
-        
-        # node_cov = torch.diag(node_unc)
-        # edge_cov = torch.diag(edge_unc)
+        node_inpt_cov = torch.diag(node_unc*node_unc)
+        edge_inpt_cov = torch.diag(edge_unc*edge_unc)
 
-        # print ("node_cov", node_cov)
-        
-        # for i, this_node_inf in enumerate(node_inf):
-        #     node_node_jac = torch.autograd.grad(this_node_inf, mean.x,
-        #                                         create_graph=True,
-        #                                         retain_graph=True,
-        #                                         allow_unused=True,
-        #     )[0]
-            
-        #     this_node_inf_unc = torch.sqrt(torch.sum(torch.pow(node_node_jac, 2)*torch.pow(node_unc, 2)))
-        #     node_inf_unc[i] = this_node_inf_unc
+        self.eval()
+        xp = inpt.x.clone().requires_grad_()
+        ep = inpt.edge_attr.clone().requires_grad_()
 
-        # for i, this_edge_inf in enumerate(edge_inf):
-        #     node_edge_jac = torch.autograd.grad(this_edge_inf, mean.x,
-        #                                         create_graph=True,
-        #                                         retain_graph=True,
-        #                                         allow_unused=True,
-        #     )[0]
+        mean_node_pred, mean_edge_pred = self.forward(inpt, final_sigmoid = False)
 
-        #     this_edge_inf_unc = torch.sum(torch.pow(node_edge_jac, 2)*torch.pow(node_unc, 2))
+        # calculate jacobian w.r.t. node inputs
+        J_node_all = torch.func.jacrev(self.forward_from_node_tensor(inpt.edge_attr, inpt.edge_index))(xp)
+        J_node_node = torch.flatten(J_node_all[0][:,0,:,:self.input_node_feats],
+                                    start_dim = 1,
+                                    end_dim = 2)
+        J_node_edge = torch.flatten(J_node_all[1][:,0,:,:self.input_node_feats],
+                                    start_dim = 1,
+                                    end_dim = 2)
 
-        #     edge_edge_jac = torch.autograd.grad(this_edge_inf, mean.edge_attr,
-        #                                         create_graph=True,
-        #                                         retain_graph=True,
-        #                                         allow_unused=True,
-        #     )[0]
+        JT_node_node = J_node_node.T
+        JT_node_edge = J_node_edge.T
 
-        #     this_edge_inf_unc += torch.sum(torch.pow(edge_edge_jac, 2)*torch.pow(edge_unc, 2))
-        #     this_edge_inf_unc = torch.sqrt(this_edge_inf_unc)
-            
-        #     edge_inf_unc[i] = this_edge_inf_unc
+        cov_node_edge = torch.matmul(torch.matmul(J_node_edge, node_inpt_cov), JT_node_edge)
+        cov_node_node = torch.matmul(torch.matmul(J_node_node, node_inpt_cov), JT_node_node)
 
-        # # print ("inference")
-        # # print (node_inf, node_inf.shape,
-        # #        edge_inf, edge_inf.shape)
+        # calculate jacobian w.r.t. edge inputs
+        J_edge_all = torch.func.jacrev(self.forward_from_edge_tensor(inpt.x, inpt.edge_index))(ep)
+        J_edge_node = torch.flatten(J_edge_all[0][:,0,:,:self.input_edge_feats],
+                                    start_dim = 1,
+                                    end_dim = 2)
+        J_edge_edge = torch.flatten(J_edge_all[1][:,0,:,:self.input_edge_feats],
+                                    start_dim = 1,
+                                    end_dim = 2)
 
-        # # print ("uncertainty")
-        # # print (node_inf_unc, node_inf_unc.shape,
-        # #        edge_inf_unc, edge_inf_unc.shape)
-            
-        # # print (node_inf.shape)
-        # # print (edge_inf.shape)
+        JT_edge_node = J_edge_node.T
+        JT_edge_edge = J_edge_edge.T
+
+        cov_edge_edge = torch.matmul(torch.matmul(J_edge_edge, edge_inpt_cov), JT_edge_edge)
+        cov_edge_node = torch.matmul(torch.matmul(J_edge_node, edge_inpt_cov), JT_edge_node)
+
+        std_node_pred = torch.sqrt(torch.diag(cov_node_node + cov_edge_node))
+        std_edge_pred = torch.sqrt(torch.diag(cov_node_edge + cov_edge_edge))
+
+        node_score = 0.5*(1 + torch.erf(mean_node_pred.flatten()/(std_node_pred*np.sqrt(2))))
+        edge_score = 0.5*(1 + torch.erf(mean_edge_pred.flatten()/(std_edge_pred*np.sqrt(2))))
+
+        return node_score[:,None], edge_score[:,None]
