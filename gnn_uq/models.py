@@ -163,6 +163,21 @@ class EdgeConvNet(torch.nn.Module):
         else:
             return node_feats, edge_feats
 
+    def forward_from_tensors(self, node_feats, edge_feats, edge_index):
+
+        node_feats = self.nodeMP1(node_feats, edge_index)
+        edge_feats = self.edgeMP1(node_feats, edge_feats, edge_index)
+        node_feats = self.nodeMP2(node_feats, edge_index)
+        edge_feats = self.edgeMP2(node_feats, edge_feats, edge_index)
+
+        node_feats = self.nodeMLPhead(node_feats)
+        edge_feats = self.edgeMLPhead(edge_feats)
+
+        if self.final_sigmoid:
+            return torch.sigmoid(node_feats), torch.sigmoid(edge_feats)
+        else:
+            return node_feats, edge_feats
+
 class EdgeConv_SDP(torch.nn.Module):
     def __init__(self, input_node_feats = 16, input_edge_feats = 19):
         super().__init__()
@@ -173,9 +188,6 @@ class EdgeConv_SDP(torch.nn.Module):
                                      final_sigmoid = False)
 
     def forward(self, inpt):
-        # print (inpt.x.shape)
-        # print (inpt.edge_attr.shape)
-        # print (inpt.edge_index.shape)
         mean = GraphData(x = inpt.x[:,:self.input_node_feats],
                          edge_index = inpt.edge_index,
                          edge_attr = inpt.edge_attr[:,:self.input_edge_feats],
@@ -188,58 +200,74 @@ class EdgeConv_SDP(torch.nn.Module):
 
         node_inf, edge_inf =  self.inner_GNN(mean)
 
+        return torch.sigmoid(node_inf), torch.sigmoid(edge_inf)
+
+    def forward_from_tensors(self, node_feats, edge_feats, edge_index):
+        node_mean = node_feats[:,:self.input_node_feats]
+        edge_mean = edge_feats[:,:self.input_edge_feats]
+        
+        node_unc = torch.exp(inpt.x[:,self.input_node_feats:])
+        edge_unc = torch.exp(inpt.edge_attr[:,self.input_edge_feats:])
+        
+        node_inf, edge_inf =  self.inner_GNN.forward_from_tensors(node_mean, edge_mean, edge_index)
+
+        return torch.sigmoid(node_inf), torch.sigmoid(edge_inf)
+    
+    def predict (self, inpt):
+        print ("jacobian calculating...")
+        J = torch.vmap(torch.func.jacrev(self.forward_from_tensors))(inpt.x, inpt.edge_attr, inpt.index)
+
+        print ("jacobian incomming...")
+        print (J)
+        
         # print (node_inf)
         # print (node_inf[0])
 
-        node_inf_unc = torch.empty_like(node_inf)
-        edge_inf_unc = torch.empty_like(edge_inf)
+        # node_inf_unc = torch.empty_like(node_inf)
+        # edge_inf_unc = torch.empty_like(edge_inf)
         
         # node_cov = torch.diag(node_unc)
         # edge_cov = torch.diag(edge_unc)
 
         # print ("node_cov", node_cov)
-
         
-        
-        for i, this_node_inf in enumerate(node_inf):
-            node_node_jac = torch.autograd.grad(this_node_inf, mean.x,
-                                                create_graph=True,
-                                                retain_graph=True,
-                                                allow_unused=True,
-            )[0]
+        # for i, this_node_inf in enumerate(node_inf):
+        #     node_node_jac = torch.autograd.grad(this_node_inf, mean.x,
+        #                                         create_graph=True,
+        #                                         retain_graph=True,
+        #                                         allow_unused=True,
+        #     )[0]
             
-            this_node_inf_unc = torch.sqrt(torch.sum(torch.pow(node_node_jac, 2)*torch.pow(node_unc, 2)))
-            node_inf_unc[i] = this_node_inf_unc
+        #     this_node_inf_unc = torch.sqrt(torch.sum(torch.pow(node_node_jac, 2)*torch.pow(node_unc, 2)))
+        #     node_inf_unc[i] = this_node_inf_unc
 
-        for i, this_edge_inf in enumerate(edge_inf):
-            node_edge_jac = torch.autograd.grad(this_edge_inf, mean.x,
-                                                create_graph=True,
-                                                retain_graph=True,
-                                                allow_unused=True,
-            )[0]
+        # for i, this_edge_inf in enumerate(edge_inf):
+        #     node_edge_jac = torch.autograd.grad(this_edge_inf, mean.x,
+        #                                         create_graph=True,
+        #                                         retain_graph=True,
+        #                                         allow_unused=True,
+        #     )[0]
 
-            this_edge_inf_unc = torch.sum(torch.pow(node_edge_jac, 2)*torch.pow(node_unc, 2))
+        #     this_edge_inf_unc = torch.sum(torch.pow(node_edge_jac, 2)*torch.pow(node_unc, 2))
 
-            edge_edge_jac = torch.autograd.grad(this_edge_inf, mean.edge_attr,
-                                                create_graph=True,
-                                                retain_graph=True,
-                                                allow_unused=True,
-            )[0]
+        #     edge_edge_jac = torch.autograd.grad(this_edge_inf, mean.edge_attr,
+        #                                         create_graph=True,
+        #                                         retain_graph=True,
+        #                                         allow_unused=True,
+        #     )[0]
 
-            this_edge_inf_unc += torch.sum(torch.pow(edge_edge_jac, 2)*torch.pow(edge_unc, 2))
-            this_edge_inf_unc = torch.sqrt(this_edge_inf_unc)
+        #     this_edge_inf_unc += torch.sum(torch.pow(edge_edge_jac, 2)*torch.pow(edge_unc, 2))
+        #     this_edge_inf_unc = torch.sqrt(this_edge_inf_unc)
             
-            edge_inf_unc[i] = this_edge_inf_unc
+        #     edge_inf_unc[i] = this_edge_inf_unc
 
-        # print ("inference")
-        # print (node_inf, node_inf.shape,
-        #        edge_inf, edge_inf.shape)
+        # # print ("inference")
+        # # print (node_inf, node_inf.shape,
+        # #        edge_inf, edge_inf.shape)
 
-        # print ("uncertainty")
-        # print (node_inf_unc, node_inf_unc.shape,
-        #        edge_inf_unc, edge_inf_unc.shape)
+        # # print ("uncertainty")
+        # # print (node_inf_unc, node_inf_unc.shape,
+        # #        edge_inf_unc, edge_inf_unc.shape)
             
-        # print (node_inf.shape)
-        # print (edge_inf.shape)
-        
-        return torch.sigmoid(node_inf), torch.sigmoid(edge_inf)
+        # # print (node_inf.shape)
+        # # print (edge_inf.shape)

@@ -32,12 +32,14 @@ def trainLoop(model, dataloader, optimizer,
         batch = batch.to(device)
         optimizer.zero_grad()
         nodeInf, edgeInf = model(batch)
+
+        model.predict(batch)
         
-        nodeTarget = batch_mean.y.clone().detach().float()
+        nodeTarget = batch.y.clone().detach().float()
         nodeLoss = F.binary_cross_entropy(nodeInf[:, 0],
                                           nodeTarget)
         
-        edgeTarget = batch_mean.edge_label.clone().detach().float()
+        edgeTarget = batch.edge_label.clone().detach().float()
         edgeLoss = F.binary_cross_entropy(edgeInf[:,0],
                                           edgeTarget)
 
