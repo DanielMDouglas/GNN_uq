@@ -224,7 +224,7 @@ class ShowerFeaturesPared(GraphDataset):
         # noise_lb, noise_ub = 0.2, 0.5
         noise_lb, noise_ub = self._noise_interval[0], self._noise_interval[1]
         # import time
-        if self._mode in ['UA', 'blind']:
+        if self._mode in ['UA', 'blind', 'blind_truncated']:
             # t1 = time.clock_gettime(0)
             node_noise = noise_lb + (noise_ub - noise_lb)*torch.rand(node_features.shape) # noise magnitude for UA/blind
             node_noise *= torch.abs(node_features)
@@ -267,6 +267,9 @@ class ShowerFeaturesPared(GraphDataset):
             # tf = time.clock_gettime(0)
             # print ("ignoring noise", tf - ti)
 
+        elif self._mode in ['blind_truncated']:
+            node_uq_features = noisy_node_features
+            edge_uq_features = noisy_edge_features
                     
         return GraphData(x = node_uq_features,
                          edge_index = edge_index,
@@ -347,3 +350,20 @@ class ShowerFeaturesMeanonly(GraphDataset):
 
     def get(self,idx):
         return self[idx]
+    
+def approx_erf(x):
+    print (x)
+    return torch.tanh(x*torch.pi/(np.sqrt(6)))
+    # return torch.erf(x)
+
+def approx_cdf(x):
+    # if x >= 0:
+    #     return 1./(1 + torch.exp(-1.6*x))
+    # else:
+    #     return torch.exp(1.6*x)/(1 + torch.exp(1.6*x))
+    result =  torch.where(x > 0,
+                          1./(1 + torch.exp(-1.6*x)),
+                          torch.exp(1.6*x)/(1 + torch.exp(1.6*x)),
+    )
+
+    return result
