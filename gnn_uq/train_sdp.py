@@ -19,7 +19,6 @@ from models import *
 def trainLoop(model, dataloader, optimizer,
               epoch,
               verbose = True,
-              enable_sdp = False,
               **kwargs):
     if verbose:
         pbar = tqdm(dataloader)
@@ -32,15 +31,9 @@ def trainLoop(model, dataloader, optimizer,
     model.train()
     for i, batch in enumerate(iterable):
         batch.to(device)
-        
-        if enable_sdp and batch.x.shape[0] > 20:
-            continue
 
-        # # burn in without jac propagation first
-        # if epoch < 1:
-        #     nodeInf, edgeInf = model(batch.to(device))
-        # else:
-        # nodeInf, edgeInf = model.predict_autograd(batch.to(device))
+        if batch.x.shape[0] >= args.max_graph_size:
+            continue
 
         nodeInf, edgeInf = model.forward_from_tensors(batch.x[:,:10],
                                                       batch.edge_attr[:,:6],
@@ -60,9 +53,8 @@ def trainLoop(model, dataloader, optimizer,
         J_edge_node = J_edge_node[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
         J_edge_edge = J_edge_edge[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
 
-        # sdp_scale = args.alpha
-        sdp_scale = 1
-        epsilon = 1.e-3
+        sdp_scale = args.sdp_scale
+        epsilon = args.sdp_epsilon
         
         node_var = sdp_scale*torch.pow(torch.flatten(torch.exp(batch.x[:,10:])), 2) + epsilon
         edge_var = sdp_scale*torch.pow(torch.flatten(torch.exp(batch.edge_attr[:,6:])), 2) + epsilon
@@ -78,43 +70,45 @@ def trainLoop(model, dataloader, optimizer,
         node_score = approx_cdf(nodeInf.flatten()/std_node_pred)
         edge_score = approx_cdf(edgeInf.flatten()/std_edge_pred)
 
-        print (np.min(node_score), np.max(node_score))
-        print (np.min(edge_score), np.max(edge_score))
-
-        nodeTarget = batch.y.clone().detach().float()
-        nodeLoss = F.binary_cross_entropy(node_score,
-                                          nodeTarget)
+        if torch.any(torch.isnan(node_score)) or torch.any(torch.isnan(edge_score)):
+            print (node_score, edge_score)
+            optimizer.zero_grad()
+            continue
         
-        edgeTarget = batch.edge_label.clone().detach().float()
-        edgeLoss = F.binary_cross_entropy(edge_score,
-                                          edgeTarget)
+        try:
+            nodeTarget = batch.y.clone().detach().float()
+            nodeLoss = F.binary_cross_entropy(node_score,
+                                              nodeTarget)
+            
+            edgeTarget = batch.edge_label.clone().detach().float()
+            edgeLoss = F.binary_cross_entropy(edge_score,
+                                              edgeTarget)
+            loss = nodeLoss + edgeLoss
+            
+            train_loss.append(loss.item())
+            if verbose:
+                pbarMessage = " ".join(["train loss:",
+                                        str(round(loss.item(), 4))])
+                pbar.set_description(pbarMessage)
+                
+            if args.accumulation_steps != 1:
+                (loss / args.accumulation_steps).backward()
+                if (i + 1)%args.accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+            else:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        loss = nodeLoss + edgeLoss
-        train_loss.append(loss.item())
-        if verbose:
-            pbarMessage = " ".join(["train loss:",
-                                    str(round(loss.item(), 4))])
-            pbar.set_description(pbarMessage)
-        
-        loss.backward()
+        except RuntimeError:
+            print (nodeInf, edgeInf)
 
-        # if args.enable_sdp:
-        #     # for i in model.parameters():
-        #     #     print (i)
-        #     clip = 1.e4
-        #     clip_res = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
-        #     print ("total norm", clip_res)
-        #     clip_res = torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        #     print ("total norm", clip_res)
-
-        optimizer.step()
-
-    return train_loss
+    return train_loss    
 
 def testLoop(model, dataloader,
              epoch,
              verbose = True,
-             enable_sdp = False,
              **kwargs):
     if verbose:
         pbar = tqdm(dataloader)
@@ -128,57 +122,82 @@ def testLoop(model, dataloader,
     
     model.eval()
     for i, batch in enumerate(iterable):
-        if enable_sdp and batch.x.shape[0] > 30:
-            # print ('skipping')
+        batch.to(device)
+        
+        if batch.x.shape[0] >= args.max_graph_size:
             continue
-        # else:
-        #     print ('not skipping')
 
-        # if epoch < 1:
-        #     nodeInf, edgeInf = model(batch)
-        # else:
-        # nodeInf, edgeInf = model.predict_autograd(batch)
-        # nodeInf, edgeInf = model.predict_jacfwd(batch)
-        if enable_sdp:
-            nodeInf, edgeInf = model.predict_jacfwd(batch.to(device))
-        else:
-            nodeInf, edgeInf = model(batch.to(device))
-             
-        # print (edgeInf)
-        nodeTarget = batch.y.clone().detach().float()
-        nodeLoss = F.binary_cross_entropy(nodeInf[:, 0],
-                                          nodeTarget)
+        nodeInf, edgeInf = model.forward_from_tensors(batch.x[:,:10],
+                                                      batch.edge_attr[:,:6],
+                                                      batch.edge_index,
+        )
 
-        decision_boundary = 0.5
-        node_decision = nodeInf > decision_boundary
-        TP = node_decision[:,0] == nodeTarget
-        node_acc = torch.sum(TP)/len(node_decision)
+        jac = torch.func.jacrev(model.forward_from_tensors,
+                                argnums = (0, 1))(batch.x[:,:10],
+                                                  batch.edge_attr[:,:6],
+                                                  batch.edge_index)
+        (J_node_node, J_node_edge), (J_edge_node, J_edge_edge) = jac
         
-        edgeTarget = batch.edge_label.clone().detach().float()
-        edgeLoss = F.binary_cross_entropy(edgeInf[:,0],
-                                          edgeTarget)
+        J_node_node = J_node_node[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
+        J_node_edge = J_node_edge[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
+        J_edge_node = J_edge_node[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
+        J_edge_edge = J_edge_edge[:,0,:,:].flatten(start_dim = 1, end_dim = 2)
 
-        decision_boundary = 0.5
-        edge_decision = edgeInf > decision_boundary
-        TP = edge_decision[:,0] == edgeTarget
-
-        edge_acc = torch.sum(TP)/len(edge_decision)
+        sdp_scale = args.sdp_scale
+        epsilon = args.sdp_epsilon
         
-        loss = nodeLoss + edgeLoss
-        # loss = edgeLoss
+        node_var = sdp_scale*torch.pow(torch.flatten(torch.exp(batch.x[:,10:])), 2) + epsilon
+        edge_var = sdp_scale*torch.pow(torch.flatten(torch.exp(batch.edge_attr[:,6:])), 2) + epsilon
 
-        test_loss.append(loss.item())
-        test_node_acc.append(node_acc.item())
-        test_edge_acc.append(edge_acc.item())
+        cov_node_node = torch.diag(torch.matmul(J_node_node*node_var, J_node_node.T))
+        cov_node_edge = torch.diag(torch.matmul(J_node_edge*edge_var, J_node_edge.T))
+        cov_edge_node = torch.diag(torch.matmul(J_edge_node*node_var, J_edge_node.T))
+        cov_edge_edge = torch.diag(torch.matmul(J_edge_edge*edge_var, J_edge_edge.T))
+
+        std_node_pred = torch.sqrt(cov_node_node + cov_node_edge)
+        std_edge_pred = torch.sqrt(cov_edge_node + cov_edge_edge)
+
+        node_score = approx_cdf(nodeInf.flatten()/std_node_pred)
+        edge_score = approx_cdf(edgeInf.flatten()/std_edge_pred)
+
         
-        if verbose:
-            pbarMessage = " ".join(["test loss:",
-                                    str(round(loss.item(), 4)),
-                                    "node acc:",
-                                    str(round(node_acc.item(), 4)),
-                                    "edge acc:",
-                                    str(round(edge_acc.item(), 4))])
-            pbar.set_description(pbarMessage)
+        try:
+
+            edgeTarget = batch.edge_label.clone().detach().float()
+            edgeLoss = F.binary_cross_entropy(edgeInf[:, 0],
+                                              edgeTarget)
+
+            nodeTarget = batch.y.clone().detach().float()
+            nodeLoss = F.binary_cross_entropy(nodeInf[:, 0],
+                                              nodeTarget)
+            
+            decision_boundary = 0.5
+            node_decision = nodeInf > decision_boundary
+            TP = node_decision[:,0] == nodeTarget
+            node_acc = torch.sum(TP)/len(node_decision)
+            
+            decision_boundary = 0.5
+            edge_decision = edgeInf > decision_boundary
+            TP = edge_decision[:,0] == edgeTarget
+            edge_acc = torch.sum(TP)/len(edge_decision)
+            
+            loss = nodeLoss + edgeLoss
+            
+            test_loss.append(loss.item())
+            test_node_acc.append(node_acc.item())
+            test_edge_acc.append(edge_acc.item())
+            
+            if verbose:
+                pbarMessage = " ".join(["test loss:",
+                                        str(round(loss.item(), 4)),
+                                        "node acc:",
+                                        str(round(node_acc.item(), 4)),
+                                        "edge acc:",
+                                        str(round(edge_acc.item(), 4))])
+                pbar.set_description(pbarMessage)
+
+        except RuntimeError:
+            print (nodeInf, edgeInf)
 
     # print ("test loss:", np.mean(test_loss), np.std(test_loss))
     return test_loss, test_node_acc, test_edge_acc
@@ -187,10 +206,7 @@ def testLoop(model, dataloader,
 def main(args):
     num_workers = 0
 
-    if args.enable_sdp:
-        batch_size = 1
-    else:
-        batch_size = 64
+    batch_size = 1
 
     # batch_size = 16
     train_data = ShowerFeaturesPared(file_path = args.train,
@@ -200,6 +216,7 @@ def main(args):
     )
     train_dataloader = GraphDataLoader(train_data,
                                        shuffle     = True,
+                                       # shuffle     = False,
                                        num_workers = num_workers,
                                        batch_size  = batch_size
     )
@@ -217,13 +234,15 @@ def main(args):
 
     model = EdgeConvNet(input_node_feats = 10,
                         input_edge_feats = 6,
-                        aggr = 'add').to(device)
+                        aggr = 'add',
+                        final_sigmoid = False).to(device)
     # model = EdgeConv_SDP(input_node_feats = 10,
     #                      input_edge_feats = 6,
     #                      sdp_scale = 10,
     #                      epsilon = 1.e-2).to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=1.e-6, weight_decay=5e-4)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1.e-6, weight_decay=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.e-7, weight_decay=5e-4)
 
     if args.checkpoint:
         with open(args.checkpoint, 'rb') as f:
@@ -246,8 +265,7 @@ def main(args):
                                      train_dataloader,
                                      optimizer,
                                      n_epoch,
-                                     args.verbose,
-                                     args.enable_sdp)
+                                     args.verbose)
 
         if n_epoch%args.checkpoint_period == 0:
             checkpoint_path = os.path.join(args.output, 'checkpoint_epoch_'+str(n_epoch)+'.ckpt')
@@ -257,8 +275,7 @@ def main(args):
         test_metrics = testLoop(model,
                                 test_dataloader,
                                 n_epoch,
-                                args.verbose,
-                                args.enable_sdp)
+                                args.verbose)
 
         epoch_test_loss, epoch_test_node_accuracy, epoch_test_edge_accuracy = test_metrics
 
@@ -342,18 +359,27 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--checkpoint', type = str,
                         default = '',
                         help = "checkpoint to load")
+    parser.add_argument('-a', '--accumulation_steps', type = int,
+                        default = 1,
+                        help = "accumulate gradient over N steps (helps to smooth optimization)")
+    parser.add_argument('-s', '--sdp_scale', type = float,
+                        default = 1,
+                        help = "scalar for input feature covariance")
+    parser.add_argument('-e', '--sdp_epsilon', type = float,
+                        default = 1.e-4,
+                        help = "epsilon for input feature covariance")
     parser.add_argument('-f', '--checkpoint_period', type = int,
                         default = 1,
                         help = "save a checkpoint every N epochs")
     parser.add_argument('-o', '--output', type = str,
                         default = '.',
                         help = "output prefix directory")
+    parser.add_argument('-m', '--max_graph_size', type = int,
+                        default = 35,
+                        help = "maximum number of nodes per graph (to avoid memory overflows)")
     parser.add_argument('-v', '--verbose',
                         action = 'store_true',
                         help = "print extra debug messages")
-    parser.add_argument('-s', '--enable_sdp',
-                        action = 'store_true',
-                        help = "providing this flag enables SDP propagation of input error instead of directly predicting a Bernoulli score")
     
     args = parser.parse_args()
 
